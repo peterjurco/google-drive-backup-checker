@@ -123,7 +123,7 @@ class DriveBackupChecker:
         Returns:
             Dictionary: {relatívna_cesta: {id, size, mimeType}}
         """
-        cache_file = self.cache_dir / 'drive_files_cache.json'
+        cache_file = self.cache_dir / f'drive_files_cache_{folder_id or "root"}.json'
         
         if use_cache and cache_file.exists():
             print("Načítavam Google Drive súbory z cache...")
@@ -133,71 +133,85 @@ class DriveBackupChecker:
         if not self.service:
             self.authenticate()
         
-        print("Skenujem Google Drive súbory...")
+        if folder_id:
+            print(f"Skenujem Google Drive priečinok (ID: {folder_id})...")
+        else:
+            print("Skenujem celý Google Drive (My Drive)...")
+        
         files_index = {}
-        id_to_path = {}  # Mapovanie ID súboru na cestu
         
-        # Najprv získame všetky súbory a priečinky
-        query = "'root' in parents and trashed=false" if not folder_id else \
-                f"'{folder_id}' in parents and trashed=false"
+        # Rekurzívna funkcia na získanie všetkých súborov z priečinka
+        def get_files_recursive(parent_id: Optional[str], path_prefix: str = ""):
+            """Rekurzívne získa všetky súbory z priečinka a podpriečinkov."""
+            # Query pre získanie položiek z priečinka
+            if parent_id:
+                query = f"'{parent_id}' in parents and trashed=false"
+            else:
+                query = "trashed=false"
+            
+            page_token = None
+            items = []
+            
+            while True:
+                try:
+                    results = self.service.files().list(
+                        pageSize=1000,
+                        fields="nextPageToken, files(id, name, mimeType, size, parents)",
+                        pageToken=page_token,
+                        q=query
+                    ).execute()
+                    
+                    items.extend(results.get('files', []))
+                    page_token = results.get('nextPageToken')
+                    
+                    if not page_token:
+                        break
+                        
+                except HttpError as error:
+                    print(f"Chyba API: {error}")
+                    break
+            
+            return items
         
-        files_to_process = []
-        
-        # Používame pagináciu pre efektívne spracovanie veľkých dát
-        page_token = None
+        # Získame všetky súbory (ak folder_id, len z toho priečinka, inak všetko)
         print("Načítavam zoznam súborov z Drive...")
         
-        while True:
-            try:
-                results = self.service.files().list(
-                    pageSize=1000,  # Maximum povolené API
-                    fields="nextPageToken, files(id, name, mimeType, size, parents)",
-                    pageToken=page_token,
-                    q="trashed=false"  # Všetky súbory okrem koša
-                ).execute()
-                
-                items = results.get('files', [])
-                files_to_process.extend(items)
-                
-                page_token = results.get('nextPageToken')
-                print(f"  Načítaných {len(files_to_process)} položiek...")
-                
-                if not page_token:
-                    break
-                    
-            except HttpError as error:
-                print(f"Chyba API: {error}")
-                break
+        if folder_id:
+            # Skenujeme len špecifický priečinok a podpriečinky
+            files_to_process = get_files_recursive(folder_id)
+        else:
+            # Skenujeme celý Drive
+            files_to_process = get_files_recursive(None)
         
         print(f"Celkom načítaných {len(files_to_process)} položiek z Drive")
         
-        # Vytvoríme mapu ID -> meno pre priečinky
-        id_to_name = {}
-        folders = {}
-        
-        for item in files_to_process:
-            id_to_name[item['id']] = item['name']
-            if item['mimeType'] == 'application/vnd.google-apps.folder':
-                folders[item['id']] = item
+        # Vytvoríme mapu ID -> item pre rýchle vyhľadávanie
+        id_to_item = {item['id']: item for item in files_to_process}
         
         # Funkcia na rekonštrukciu cesty
-        def get_full_path(item):
-            """Vytvorí plnú cestu k súboru."""
+        def get_relative_path(item, root_id):
+            """
+            Vytvorí relatívnu cestu k súboru.
+            Ak je root_id zadaný, cesta je relatívna k tomuto priečinku.
+            """
             path_parts = [item['name']]
             current_parents = item.get('parents', [])
             
-            # Ideme nahor hierarchiou
+            # Ideme nahor hierarchiou až po root_id (alebo úplný root)
             while current_parents:
                 parent_id = current_parents[0]
-                if parent_id in id_to_name:
-                    path_parts.insert(0, id_to_name[parent_id])
-                    # Nájdeme rodičov tohto rodiča
-                    parent_item = next((i for i in files_to_process if i['id'] == parent_id), None)
-                    if parent_item:
-                        current_parents = parent_item.get('parents', [])
-                    else:
-                        break
+                
+                # Ak sme dosiahli root priečinok, zastavíme
+                if root_id and parent_id == root_id:
+                    break
+                
+                # Ak rodič je v našom indexe
+                if parent_id in id_to_item:
+                    parent_item = id_to_item[parent_id]
+                    path_parts.insert(0, parent_item['name'])
+                    current_parents = parent_item.get('parents', [])
                 else:
+                    # Rodič nie je v indexe (je mimo skenovej oblasti)
                     break
             
             return '/'.join(path_parts)
@@ -206,18 +220,20 @@ class DriveBackupChecker:
         print("Spracovávam cesty súborov...")
         with tqdm(total=len(files_to_process), desc="Vytváram index") as pbar:
             for item in files_to_process:
-                # Preskočíme priečinky a Google-native súbory (Docs, Sheets, atď.)
+                # Preskočíme priečinky
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
                     pbar.update(1)
                     continue
                 
-                # Google-native dokumenty nemajú size
+                # Preskočíme Google-native dokumenty (Docs, Sheets, atď.)
                 if item['mimeType'].startswith('application/vnd.google-apps.'):
                     pbar.update(1)
                     continue
                 
-                full_path = get_full_path(item)
-                files_index[full_path] = {
+                # Vytvoríme relatívnu cestu
+                rel_path = get_relative_path(item, folder_id)
+                
+                files_index[rel_path] = {
                     'id': item['id'],
                     'size': int(item.get('size', 0)),
                     'mimeType': item['mimeType']
