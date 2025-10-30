@@ -103,8 +103,6 @@ python drive_backup_checker.py /home/user/documents --output moja-sprava.json
 
 Ak chcete porovnať len konkrétny priečinok na Drive (nie celý Drive), potrebujete jeho ID:
 
-### Metóda 1: Z URL v prehliadači (najjednoduchšie)
-
 1. Otvorte [Google Drive](https://drive.google.com) v prehliadači
 2. Otvorte priečinok, ktorý chcete porovnať
 3. Pozrite sa na URL v adresnom riadku:
@@ -116,41 +114,6 @@ https://drive.google.com/drive/folders/1XyZ_aBcDeFgHiJkLmNoPqRsTuVwXyZ123
 ```
 
 4. Skopírujte dlhý reťazec za `/folders/`
-
-### Metóda 2: Cez "Share" tlačidlo
-
-1. Kliknite pravým tlačidlom na priečinok v Google Drive
-2. Vyberte **"Share"** alebo **"Get link"**
-3. Skopírujte link - ID je v ňom medzi `/folders/` a `?`:
-
-```
-https://drive.google.com/drive/folders/1XyZ_aBcDeFgHiJkLmNoPqRsTuVwXyZ123?usp=sharing
-                                         └────────────────────────────┘
-```
-
-### Metóda 3: Pomocou helper skriptu
-
-Použite priložený helper skript, ktorý vypíše všetky priečinky s ID:
-
-```bash
-# Zobraziť priečinky v My Drive root
-python list_drive_folders.py
-
-# Zobraziť všetky priečinky vrátane vnorených
-python list_drive_folders.py --all
-```
-
-Výstup:
-```
-📁 PRIEČINKY NA GOOGLE DRIVE
-==========================================================================================
-Názov priečinka                                    ID priečinka
-------------------------------------------------------------------------------------------
-Dokumenty                                          1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p
-Fotky                                              9i8h7g6f5e4d3c2b1a0z9y8x7w6v5u4t
-Zálohy 2024                                        1XyZ_aBcDeFgHiJkLmNoPqRsTuVwXyZ123
-------------------------------------------------------------------------------------------
-```
 
 ### Použitie ID
 
@@ -243,7 +206,6 @@ Skript je optimalizovaný pre veľké objemy dát:
 ```
 google-drive-backup-checker/
 ├── drive_backup_checker.py    # Hlavný skript
-├── list_drive_folders.py      # Helper pre zoznam priečinkov a ID
 ├── requirements.txt            # Python závislosti
 ├── config.example.py           # Príklad konfigurácie
 ├── credentials.json            # Google API credentials (pridáte vy)
