@@ -135,13 +135,29 @@ class DriveBackupChecker:
         
         if folder_id:
             print(f"Skenujem Google Drive priečinok (ID: {folder_id})...")
+            # Overíme, že priečinok existuje a máme k nemu prístup
+            try:
+                folder_info = self.service.files().get(
+                    fileId=folder_id,
+                    fields="id, name, mimeType"
+                ).execute()
+                print(f"✓ Priečinok nájdený: '{folder_info['name']}'")
+                
+                if folder_info['mimeType'] != 'application/vnd.google-apps.folder':
+                    print(f"⚠️  POZOR: Toto nie je priečinok, ale {folder_info['mimeType']}")
+            except HttpError as error:
+                print(f"❌ Chyba pri prístupe k priečinku: {error}")
+                if error.resp.status == 404:
+                    print("   Priečinok neexistuje alebo nemáte k nemu prístup.")
+                return {}
         else:
             print("Skenujem celý Google Drive (My Drive)...")
         
         files_index = {}
+        all_items = []
         
         # Rekurzívna funkcia na získanie všetkých súborov z priečinka
-        def get_files_recursive(parent_id: Optional[str], path_prefix: str = ""):
+        def get_files_recursive(parent_id: Optional[str]):
             """Rekurzívne získa všetky súbory z priečinka a podpriečinkov."""
             # Query pre získanie položiek z priečinka
             if parent_id:
@@ -161,14 +177,15 @@ class DriveBackupChecker:
                         q=query
                     ).execute()
                     
-                    items.extend(results.get('files', []))
+                    page_items = results.get('files', [])
+                    items.extend(page_items)
                     page_token = results.get('nextPageToken')
                     
                     if not page_token:
                         break
                         
                 except HttpError as error:
-                    print(f"Chyba API: {error}")
+                    print(f"❌ Chyba API: {error}")
                     break
             
             return items
@@ -177,13 +194,52 @@ class DriveBackupChecker:
         print("Načítavam zoznam súborov z Drive...")
         
         if folder_id:
-            # Skenujeme len špecifický priečinok a podpriečinky
-            files_to_process = get_files_recursive(folder_id)
+            # Najprv získame obsah špecifického priečinka
+            direct_items = get_files_recursive(folder_id)
+            print(f"  Priamo v priečinku: {len(direct_items)} položiek")
+            
+            # Počítadlá pre debugging
+            folders_to_scan = []
+            files_count = 0
+            folders_count = 0
+            
+            for item in direct_items:
+                if item['mimeType'] == 'application/vnd.google-apps.folder':
+                    folders_to_scan.append(item)
+                    folders_count += 1
+                else:
+                    files_count += 1
+            
+            print(f"    → {files_count} súborov")
+            print(f"    → {folders_count} podpriečinkov")
+            
+            all_items.extend(direct_items)
+            
+            # Rekurzívne prejdeme všetky podpriečinky
+            if folders_to_scan:
+                print(f"  Skenujem {len(folders_to_scan)} podpriečinkov...")
+                scanned_count = 0
+                
+                while folders_to_scan:
+                    folder = folders_to_scan.pop(0)
+                    scanned_count += 1
+                    sub_items = get_files_recursive(folder['id'])
+                    
+                    if sub_items:
+                        print(f"    [{scanned_count}/{scanned_count + len(folders_to_scan)}] '{folder['name']}': {len(sub_items)} položiek")
+                    
+                    for item in sub_items:
+                        if item['mimeType'] == 'application/vnd.google-apps.folder':
+                            folders_to_scan.append(item)
+                    
+                    all_items.extend(sub_items)
+            
+            files_to_process = all_items
         else:
             # Skenujeme celý Drive
             files_to_process = get_files_recursive(None)
         
-        print(f"Celkom načítaných {len(files_to_process)} položiek z Drive")
+        print(f"\nCelkom načítaných {len(files_to_process)} položiek z Drive")
         
         # Vytvoríme mapu ID -> item pre rýchle vyhľadávanie
         id_to_item = {item['id']: item for item in files_to_process}
@@ -217,16 +273,24 @@ class DriveBackupChecker:
             return '/'.join(path_parts)
         
         # Spracovanie súborov (nie priečinkov)
-        print("Spracovávam cesty súborov...")
+        print("\nSpracovávam cesty súborov...")
+        
+        # Počítadlá pre štatistiku
+        skipped_folders = 0
+        skipped_google_docs = 0
+        processed_files = 0
+        
         with tqdm(total=len(files_to_process), desc="Vytváram index") as pbar:
             for item in files_to_process:
                 # Preskočíme priečinky
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
+                    skipped_folders += 1
                     pbar.update(1)
                     continue
                 
                 # Preskočíme Google-native dokumenty (Docs, Sheets, atď.)
                 if item['mimeType'].startswith('application/vnd.google-apps.'):
+                    skipped_google_docs += 1
                     pbar.update(1)
                     continue
                 
@@ -238,13 +302,24 @@ class DriveBackupChecker:
                     'size': int(item.get('size', 0)),
                     'mimeType': item['mimeType']
                 }
+                processed_files += 1
                 pbar.update(1)
+        
+        # Štatistika
+        print(f"\n📊 Štatistika skenovania:")
+        print(f"  Súbory spracované:     {processed_files}")
+        print(f"  Priečinky preskočené:  {skipped_folders}")
+        print(f"  Google Docs preskočené: {skipped_google_docs}")
+        
+        if skipped_google_docs > 0:
+            print(f"\n💡 TIP: Google Docs/Sheets/Slides nemajú 'size' a nedajú sa priamo porovnať.")
+            print(f"         Tieto súbory sú preskočené (celkom {skipped_google_docs}).")
         
         # Ulož do cache
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump(files_index, f, ensure_ascii=False, indent=2)
         
-        print(f"✓ Nájdených {len(files_index)} súborov na Drive")
+        print(f"\n✓ Nájdených {len(files_index)} súborov na Drive")
         return files_index
     
     def compare_files(self, local_files: Dict, drive_files: Dict) -> Dict:
